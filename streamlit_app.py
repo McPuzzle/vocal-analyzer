@@ -8,51 +8,46 @@ import tempfile, os
 import json
 import librosa
 
-# Load engineering guidelines (with fallback defaults)
+# Professional engineer guidelines with realistic parameters
 @st.cache_data
 def load_guidelines():
-    default = {
-        'deesser': {'threshold_db': [-20, -10], 'ratio': [2, 6]},
-        'saturation_blend': 0.1,
+    return {
+        'broad_difference_threshold_db': 0.5,
+        'resonance_threshold_db': 3.0,
+        'sibilance_threshold_rms': 0.02,
         'highpass_cutoff': 100,
         'highpass_slope': 12,
         'broad_eq_q': 1.5,
-        'narrow_eq_q_low': 3,
-        'narrow_eq_q_mid_high': 4,
-        'max_q_dynamic_eq': 15,
-        'min_q_dynamic_eq': 5,
+        'surgical_eq_q_range': [5, 15],
         'dynamic_eq_attack_ms': 15,
         'dynamic_eq_release_ms': 120,
-        'compression_gr_db': 2,
-        'compression_ratios': [(4, 'Comp A'), (2.5, 'Comp B')],
+        'compression_ratios': [(4, 'UAD 1176'), (2.5, 'SSL G-Bus')],
         'deesser_freq_range': (5000, 8000),
-        'sibilance_threshold_rms': 0.02  # Tune as needed
+        'deesser_threshold_range': [-20, -10],
+        'deesser_ratio_range': [2, 6],
+        'saturation_blend': 0.1,
+        'freq_bands': {
+            'Low': (20, 600),
+            'Low-Mid': (600, 1200), 
+            'Mid': (1200, 3000),
+            'High-Mid': (3000, 8000),
+            'High': (8000, 16000)
+        }
     }
-    try:
-        with open('engineer_guidelines.json') as f:
-            data = json.load(f)
-            for k, v in default.items():
-                data.setdefault(k, v)
-            return data
-    except FileNotFoundError:
-        return default
 
 guidelines = load_guidelines()
 
 def ms_to_subdivision(ms, bpm):
     beat_ms = 60000 / bpm
-    subs = {
+    subdivisions = {
         '1/4': beat_ms,
         '1/8': beat_ms / 2,
         '1/16': beat_ms / 4,
         '1/32': beat_ms / 8,
-        '1/64': beat_ms / 16,
+        '1/64': beat_ms / 16
     }
-    name, val = min(subs.items(), key=lambda x: abs(x[1] - ms))
+    name, val = min(subdivisions.items(), key=lambda x: abs(x[1] - ms))
     return name, int(val)
-
-def clamp_q(q):
-    return max(guidelines['min_q_dynamic_eq'], min(q, guidelines['max_q_dynamic_eq']))
 
 def butter_bandpass(lowcut, highcut, fs, order=4):
     sos = butter(order, [lowcut, highcut], fs=fs, btype='band', output='sos')
@@ -63,95 +58,333 @@ def bandpass_filter(data, lowcut, highcut, fs, order=4):
     y = sosfilt(sos, data)
     return y
 
-def measure_sibilance(y, sr):
-    filtered = bandpass_filter(y, guidelines['deesser_freq_range'][0], guidelines['deesser_freq_range'][1], sr, order=4)
-    rms = np.sqrt(np.mean(filtered**2))
-    return rms
+def compute_spectrum_db(y, sr, seg_start=0.33, seg_end=0.66):
+    """Compute frequency spectrum in dB for consistent segment"""
+    start_idx = int(len(y) * seg_start)
+    end_idx = int(len(y) * seg_end)
+    segment = y[start_idx:end_idx]
+    
+    # Apply window and compute FFT
+    windowed = segment * windows.hann(len(segment))
+    fft = np.fft.rfft(windowed)
+    magnitude = np.abs(fft)
+    
+    # Convert to dB with noise floor protection
+    magnitude_db = 20 * np.log10(magnitude + 1e-10)
+    freqs = np.fft.rfftfreq(len(segment), 1/sr)
+    
+    return freqs, magnitude_db
 
-def detect_resonances(freqs, mag_dry, threshold_db=-15, max_peaks=9):
+def find_broad_tonal_differences(freqs, mag_dry, mag_ref):
+    """Find broad frequency bands requiring tonal correction"""
+    differences = mag_dry - mag_ref
+    corrections = []
+    
+    for band_name, (fmin, fmax) in guidelines['freq_bands'].items():
+        band_mask = (freqs >= fmin) & (freqs <= fmax)
+        if not np.any(band_mask):
+            continue
+            
+        band_diff = np.mean(differences[band_mask])
+        
+        if abs(band_diff) >= guidelines['broad_difference_threshold_db']:
+            center_freq = np.sqrt(fmin * fmax)  # Geometric center
+            corrections.append({
+                'band': band_name,
+                'center_freq': center_freq,
+                'gain_adjustment': -band_diff,  # Negative to correct
+                'q': guidelines['broad_eq_q'],
+                'type': 'broad_correction'
+            })
+    
+    return corrections
+
+def detect_surgical_resonances(freqs, mag_dry, mag_ref):
+    """Detect narrow resonances requiring surgical cuts"""
+    difference = mag_dry - mag_ref
+    
+    # Find peaks in dry vocal that exceed reference
     peak_indices, properties = find_peaks(mag_dry, height=np.max(mag_dry) * 0.05)
-    if len(peak_indices) == 0:
-        return []
-    sorted_indices = peak_indices[np.argsort(properties['peak_heights'])[::-1]]
+    
     resonances = []
-    for idx in sorted_indices[:max_peaks]:
-        cf = freqs[idx]
-        mag = mag_dry[idx]
-        bw = estimate_bandwidth(freqs, mag_dry, idx)
-        q_val = clamp_q(cf / bw if bw > 0 else 10)
-        cut_db = 10 * np.log10(mag / np.median(mag_dry))
-        if cut_db < -threshold_db:
-            resonances.append({'freq': cf, 'q': q_val, 'gain': abs(cut_db)})
+    for idx in peak_indices:
+        # Check if this peak is significantly higher than reference
+        if difference[idx] > guidelines['resonance_threshold_db']:
+            freq = freqs[idx]
+            bandwidth = estimate_bandwidth(freqs, mag_dry, idx)
+            q_factor = np.clip(freq / bandwidth, 
+                             guidelines['surgical_eq_q_range'][0], 
+                             guidelines['surgical_eq_q_range'][1])
+            
+            resonances.append({
+                'freq': freq,
+                'q': q_factor,
+                'gain_cut': difference[idx],
+                'type': 'surgical_notch'
+            })
+    
     return resonances
 
-def estimate_bandwidth(freqs, mag, peak_idx):
-    half_power = mag[peak_idx] / np.sqrt(2)
-    left = peak_idx
-    right = peak_idx
-    while left > 0 and mag[left] > half_power:
-        left -= 1
-    while right < len(mag) - 1 and mag[right] > half_power:
-        right += 1
-    bw = freqs[right] - freqs[left] if right > left else freqs[peak_idx] / 10
-    return bw
+def estimate_bandwidth(freqs, magnitude, peak_idx):
+    """Estimate -3dB bandwidth around peak"""
+    peak_mag = magnitude[peak_idx]
+    half_power = peak_mag - 3  # -3dB point
+    
+    # Find left and right -3dB points
+    left_idx = peak_idx
+    while left_idx > 0 and magnitude[left_idx] > half_power:
+        left_idx -= 1
+        
+    right_idx = peak_idx
+    while right_idx < len(magnitude) - 1 and magnitude[right_idx] > half_power:
+        right_idx += 1
+    
+    bandwidth = freqs[right_idx] - freqs[left_idx]
+    return max(bandwidth, freqs[peak_idx] / 20)  # Minimum bandwidth
 
+def measure_sibilance_level(y, sr):
+    """Measure RMS energy in sibilant frequency range"""
+    sibilant_band = bandpass_filter(y, 
+                                   guidelines['deesser_freq_range'][0], 
+                                   guidelines['deesser_freq_range'][1], 
+                                   sr)
+    return np.sqrt(np.mean(sibilant_band**2))
 
-st.title("🎤 Musical Vocal Mix Chain Assistant")
+def detect_key_bpm(audio_path):
+    """Auto-detect key and BPM from audio file"""
+    try:
+        y, sr = librosa.load(audio_path, sr=None, duration=30)
+        
+        # Key detection using chroma
+        chroma = librosa.feature.chroma_cens(y=y, sr=sr)
+        key_names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+        key = key_names[chroma.mean(axis=1).argmax()]
+        
+        # BPM detection
+        tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+        
+        return key, int(tempo)
+    except:
+        return "Unknown", 120
 
-dry_file = st.file_uploader("Upload Dry Vocal (WAV)", type="wav")
-ref_file = st.file_uploader("Upload Reference WAV", type="wav")
+def generate_mix_chain(broad_corrections, resonances, sibilance_dry, sibilance_ref, ref_bpm):
+    """Generate complete engineer-ready mix chain"""
+    chain_steps = []
+    
+    # Step 1: Cleaning and High-Pass
+    chain_steps.append({
+        'step': 'Step 1: Cleaning',
+        'plugin': 'FabFilter Pro-Q3',
+        'settings': [
+            f"High-Pass Filter: {guidelines['highpass_cutoff']} Hz, {guidelines['highpass_slope']} dB/octave"
+        ]
+    })
+    
+    # Step 2: Broad Tonal Corrections (if needed)
+    if broad_corrections:
+        settings = []
+        for corr in broad_corrections:
+            settings.append(f"Bell EQ: {corr['center_freq']:.0f} Hz | Q: {corr['q']:.1f} | Gain: {corr['gain_adjustment']:+.1f} dB")
+        
+        chain_steps.append({
+            'step': 'Step 2: Broad Tonal Corrections',
+            'plugin': 'FabFilter Pro-Q3 or Waves Renaissance EQ',
+            'settings': settings
+        })
+    
+    # Step 3: Surgical Resonance Control (if needed)
+    if resonances:
+        settings = []
+        for res in resonances:
+            settings.append(f"Surgical Notch: {res['freq']:.0f} Hz | Q: {res['q']:.1f} | Cut: -{res['gain_cut']:.1f} dB")
+        
+        chain_steps.append({
+            'step': 'Step 3: Surgical Resonance Control',
+            'plugin': 'FabFilter Pro-Q3 or Waves Q10',
+            'settings': settings
+        })
+    
+    # Step 4: Dynamic EQ for Variable Resonances
+    if resonances:
+        settings = []
+        attack_sub, attack_ms = ms_to_subdivision(guidelines['dynamic_eq_attack_ms'], ref_bpm)
+        release_sub, release_ms = ms_to_subdivision(guidelines['dynamic_eq_release_ms'], ref_bpm)
+        
+        for res in resonances:
+            threshold = -res['gain_cut'] * 0.75  # Set threshold at 75% of peak excess
+            settings.append(f"Dynamic Bell: {res['freq']:.0f} Hz | Q: {res['q']:.1f} | "
+                          f"Threshold: {threshold:.1f} dB | Attack: {attack_sub} ({attack_ms}ms) | "
+                          f"Release: {release_sub} ({release_ms}ms)")
+        
+        chain_steps.append({
+            'step': 'Step 4: Dynamic Resonance Control',
+            'plugin': 'FabFilter Pro-Q3 Dynamic or Waves F6',
+            'settings': settings
+        })
+    
+    # Step 5: De-essing (if needed)
+    if sibilance_dry > sibilance_ref + guidelines['sibilance_threshold_rms']:
+        sibilance_excess = (sibilance_dry - sibilance_ref) / sibilance_ref
+        threshold = guidelines['deesser_threshold_range'][0] + sibilance_excess * 10
+        ratio = guidelines['deesser_ratio_range'][0] + sibilance_excess * 2
+        
+        chain_steps.append({
+            'step': 'Step 5: De-essing',
+            'plugin': 'FabFilter Pro-DS or Waves De-Esser',
+            'settings': [
+                f"Frequency Range: {guidelines['deesser_freq_range'][0]}-{guidelines['deesser_freq_range'][1]} Hz",
+                f"Threshold: {threshold:.1f} dB",
+                f"Ratio: {ratio:.1f}:1"
+            ]
+        })
+    
+    # Step 6: Compression
+    settings = []
+    attack_sub, attack_ms = ms_to_subdivision(guidelines['dynamic_eq_attack_ms'], ref_bpm)
+    release_sub, release_ms = ms_to_subdivision(guidelines['dynamic_eq_release_ms']*2, ref_bpm)
+    
+    for ratio, plugin in guidelines['compression_ratios']:
+        settings.append(f"{plugin}: Ratio {ratio}:1 | Attack: {attack_sub} ({attack_ms}ms) | "
+                       f"Release: {release_sub} ({release_ms}ms) | Target GR: ~2dB")
+    
+    chain_steps.append({
+        'step': 'Step 6: Compression Chain',
+        'plugin': 'Serial Compression',
+        'settings': settings
+    })
+    
+    # Step 7: Saturation and Glue
+    chain_steps.append({
+        'step': 'Step 7: Saturation and Glue',
+        'plugin': 'Parallel Processing',
+        'settings': [
+            f"Tape/Tube Saturation: {int(guidelines['saturation_blend']*100)}% parallel blend",
+            "Optional bus EQ: gentle high-shelf +0.5dB @ 10kHz"
+        ]
+    })
+    
+    return chain_steps
 
-if dry_file and ref_file and st.button("Analyze Mix Chain"):
-    # Save temp files
-    t1 = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    t1.write(dry_file.read())
-    t1.close()
-    t2 = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    t2.write(ref_file.read())
-    t2.close()
-    dry_path, ref_path = t1.name, t2.name
+# Streamlit UI
+st.title("🎤 Professional Vocal Reference Matching Assistant")
+st.write("Upload your dry vocal and reference track for detailed, engineer-ready mix chain generation")
 
-    y_dry, sr_dry = librosa.load(dry_path, sr=None)
-    sibilance_rms = measure_sibilance(y_dry, sr_dry)
+# File uploads
+col1, col2 = st.columns(2)
+with col1:
+    dry_file = st.file_uploader("Dry Vocal (WAV)", type=['wav'])
+with col2:
+    ref_file = st.file_uploader("Reference Vocal (WAV)", type=['wav'])
 
-    def spectrum(path):
-        sr, data = wavfile.read(path)
-        if data.ndim > 1:
-            data = data.mean(axis=1)
-        seg = data[int(len(data) * 0.33): int(len(data) * 0.66)]
-        w = seg * windows.hann(len(seg))
-        fft = np.fft.rfft(w)
-        freqs = np.fft.rfftfreq(len(seg), 1 / sr)
-        mags = np.abs(fft)
-        return freqs, mags
+# Key/BPM detection and manual override
+if dry_file or ref_file:
+    st.subheader("🔑 Key & BPM Detection")
+    
+    # Auto-detect on file upload
+    detected_key, detected_bpm = "Unknown", 120
+    if ref_file:
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
+            tmp.write(ref_file.read())
+            tmp.flush()
+            detected_key, detected_bpm = detect_key_bpm(tmp.name)
+            os.unlink(tmp.name)
+    
+    # Manual override options
+    col1, col2 = st.columns(2)
+    with col1:
+        key = st.text_input("Reference Key", value=detected_key)
+    with col2:
+        bpm = st.number_input("Reference BPM", min_value=60, max_value=200, value=detected_bpm)
 
-    freqs, mag_dry = spectrum(dry_path)
+# Main analysis
+if dry_file and ref_file and st.button("🔬 Analyze & Generate Mix Chain", type="primary"):
+    with st.spinner("Analyzing vocals and generating professional mix chain..."):
+        # Save temporary files
+        dry_temp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+        ref_temp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+        
+        dry_temp.write(dry_file.read())
+        dry_temp.close()
+        ref_temp.write(ref_file.read())
+        ref_temp.close()
+        
+        try:
+            # Load and analyze audio
+            y_dry, sr_dry = librosa.load(dry_temp.name, sr=None)
+            y_ref, sr_ref = librosa.load(ref_temp.name, sr=None)
+            
+            # Compute spectra
+            freqs_dry, mag_dry = compute_spectrum_db(y_dry, sr_dry)
+            freqs_ref, mag_ref = compute_spectrum_db(y_ref, sr_ref)
+            
+            # Interpolate reference to match dry vocal frequency resolution
+            mag_ref_interp = np.interp(freqs_dry, freqs_ref, mag_ref)
+            
+            # Spectral analysis
+            broad_corrections = find_broad_tonal_differences(freqs_dry, mag_dry, mag_ref_interp)
+            resonances = detect_surgical_resonances(freqs_dry, mag_dry, mag_ref_interp)
+            
+            # Sibilance analysis
+            sibilance_dry = measure_sibilance_level(y_dry, sr_dry)
+            sibilance_ref = measure_sibilance_level(y_ref, sr_ref)
+            
+            # Generate mix chain
+            mix_chain = generate_mix_chain(broad_corrections, resonances, 
+                                         sibilance_dry, sibilance_ref, bpm)
+            
+            # Display spectral comparison
+            st.subheader("📊 Spectral Analysis")
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=freqs_dry, y=mag_dry, name="Dry Vocal", 
+                                   line=dict(color='red', width=1)))
+            fig.add_trace(go.Scatter(x=freqs_dry, y=mag_ref_interp, name="Reference", 
+                                   line=dict(color='blue', width=1)))
+            fig.update_layout(
+                title="Spectral Comparison",
+                xaxis_title="Frequency (Hz)",
+                yaxis_title="Magnitude (dB)",
+                xaxis_type="log",
+                height=400
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Display mix chain
+            st.subheader("🎛️ Professional Mix Chain")
+            st.info(f"**Reference Track Info:** Key: {key}, BPM: {bpm}")
+            
+            for step_info in mix_chain:
+                st.markdown(f"### {step_info['step']}")
+                st.markdown(f"*Plugin: {step_info['plugin']}*")
+                for setting in step_info['settings']:
+                    st.write(f"• {setting}")
+                st.write("---")
+            
+            # Summary and recommendations
+            st.subheader("📝 Engineer Notes")
+            notes = []
+            
+            if broad_corrections:
+                notes.append(f"**Tonal Balance:** {len(broad_corrections)} frequency bands need broad correction")
+            
+            if resonances:
+                notes.append(f"**Resonances:** {len(resonances)} problematic resonances detected requiring surgical cuts")
+            
+            if sibilance_dry > sibilance_ref + guidelines['sibilance_threshold_rms']:
+                excess = ((sibilance_dry - sibilance_ref) / sibilance_ref) * 100
+                notes.append(f"**Sibilance:** {excess:.0f}% excess sibilance detected - de-essing recommended")
+            else:
+                notes.append("**Sibilance:** Levels are appropriate - no de-essing needed")
+            
+            notes.append("**Workflow:** Apply each step sequentially, A/B testing against reference after each stage")
+            notes.append("**Final Step:** Manual level riding and automation for consistency")
+            
+            for note in notes:
+                st.write(note)
+                
+        finally:
+            # Cleanup
+            os.unlink(dry_temp.name)
+            os.unlink(ref_temp.name)
 
-    resonances = detect_resonances(freqs, mag_dry)
-
-    st.markdown("## Suggested Mix Chain")
-
-    st.markdown("### 1. Cleaning")
-    st.write(f"• High-pass filter at {guidelines['highpass_cutoff']} Hz, {guidelines['highpass_slope']} dB/oct")
-
-    if len(resonances) > 0:
-        st.markdown("• Broad subtractive EQ cuts:")
-        for r in resonances:
-            st.write(f" – Center {r['freq']:.1f} Hz | Q {r['q']:.2f} | Cut –{r['gain']:.2f} dB")
-
-    st.markdown("### 2. Tone shaping")
-    st.write("• Gentle shelving EQ to shape mid and high frequencies dynamically.")
-
-    if sibilance_rms > guidelines['sibilance_threshold_rms']:
-        st.markdown("### 3. De-Essing")
-        st.write(f"• Apply De-Esser around {guidelines['deesser_freq_range'][0]}–{guidelines['deesser_freq_range'][1]} Hz with threshold -20 to -10 dB, ratio 2:1 to 6:1.")
-
-    st.markdown("### 4. Compression & Glue")
-    st.write(f"• Use two-stage compression (e.g. 1176 at 4:1 and SSL G-bus at 2.5:1) with BPM synced attack/release.")
-    st.write(f"• Add ~10% parallel tape/tube saturation for warmth.")
-
-    st.markdown("### 5. Final touches")
-    st.write(f"• Manual gain riding and A/B with reference track.")
-
-    os.unlink(dry_path)
-    os.unlink(ref_path)
+st.markdown("---")
+st.caption("Professional vocal mixing assistant - generates engineer-ready mix chains based on spectral reference matching")
