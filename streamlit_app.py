@@ -47,6 +47,12 @@ st.write("Iterative subtractive-additive workflow with musically-aware, engineer
 dry_file = st.file_uploader("Upload Dry Vocal (WAV)", type='wav')
 ref_file = st.file_uploader("Upload Reference Track (WAV)", type='wav')
 
+# Prepare session state for manual overrides
+if 'edit_dry' not in st.session_state:
+    st.session_state.edit_dry = False
+if 'edit_ref' not in st.session_state:
+    st.session_state.edit_ref = False
+
 if dry_file and ref_file and st.button("Analyze Vocals"):
     # Save temp files
     with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as t1:
@@ -70,23 +76,43 @@ if dry_file and ref_file and st.button("Analyze Vocals"):
     auto_dry_key, auto_dry_bpm = detect(dry_path)
     auto_ref_key, auto_ref_bpm = detect(ref_path)
 
+    # Dry vocal detection & override
     st.markdown(f"**Dry Vocal** → Key: `{auto_dry_key}` | BPM: `{auto_dry_bpm}`")
-    if st.checkbox("Edit Dry Key/BPM?"):
+    st.session_state.edit_dry = st.checkbox("Edit Dry Key/BPM?", value=st.session_state.edit_dry, key="chk_dry")
+    if st.session_state.edit_dry:
         col1, col2 = st.columns(2)
         with col1:
-            dry_key = st.text_input("Dry Key", auto_dry_key)
+            st.session_state.manual_dry_key = st.text_input(
+                "Dry Key", value=st.session_state.get('manual_dry_key', auto_dry_key), key="ti_dry_key"
+            )
         with col2:
-            dry_bpm = st.number_input("Dry BPM", min_value=0, max_value=300, value=auto_dry_bpm)
+            st.session_state.manual_dry_bpm = st.number_input(
+                "Dry BPM", min_value=0, max_value=300,
+                value=st.session_state.get('manual_dry_bpm', auto_dry_bpm),
+                key="ni_dry_bpm"
+            )
+        dry_key = st.session_state.manual_dry_key
+        dry_bpm = st.session_state.manual_dry_bpm
     else:
         dry_key, dry_bpm = auto_dry_key, auto_dry_bpm
 
+    # Reference vocal detection & override
     st.markdown(f"**Reference** → Key: `{auto_ref_key}` | BPM: `{auto_ref_bpm}`")
-    if st.checkbox("Edit Ref Key/BPM?"):
+    st.session_state.edit_ref = st.checkbox("Edit Ref Key/BPM?", value=st.session_state.edit_ref, key="chk_ref")
+    if st.session_state.edit_ref:
         col1, col2 = st.columns(2)
         with col1:
-            ref_key = st.text_input("Ref Key", auto_ref_key)
+            st.session_state.manual_ref_key = st.text_input(
+                "Ref Key", value=st.session_state.get('manual_ref_key', auto_ref_key), key="ti_ref_key"
+            )
         with col2:
-            ref_bpm = st.number_input("Ref BPM", min_value=0, max_value=300, value=auto_ref_bpm)
+            st.session_state.manual_ref_bpm = st.number_input(
+                "Ref BPM", min_value=0, max_value=300,
+                value=st.session_state.get('manual_ref_bpm', auto_ref_bpm),
+                key="ni_ref_bpm"
+            )
+        ref_key = st.session_state.manual_ref_key
+        ref_bpm = st.session_state.manual_ref_bpm
     else:
         ref_key, ref_bpm = auto_ref_key, auto_ref_bpm
 
