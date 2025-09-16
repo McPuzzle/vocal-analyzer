@@ -8,53 +8,37 @@ import tempfile, os
 import json
 import librosa
 
-# Load engineering guidelines (fallback defaults)
 @st.cache_data
 def load_guidelines():
-    default = {
+    return {
         "dynamic_eq": {"fabfilter_f6": {"attack_ms":[1,10],"release_ms":[50,250]}},
         "compressor": {"neve_33609": {"attack_ms":[10,30],"release_ms":[100,300]}},
         "deesser": {"default": {"threshold_db":[-20,-10],"ratio":[2,6]}}
     }
-    try:
-        with open('engineer_guidelines.json') as f:
-            data = json.load(f)
-            for k,v in default.items():
-                data.setdefault(k, v)
-            return data
-    except FileNotFoundError:
-        return default
 
 guidelines = load_guidelines()
 
 def ms_to_subdivision(ms, bpm):
     beat_ms = 60000 / bpm
-    subdivisions = {
-        '1/4': beat_ms,
-        '1/8': beat_ms/2,
-        '1/16': beat_ms/4,
-        '1/32': beat_ms/8,
-        '1/64': beat_ms/16
-    }
+    subdivisions = {'1/4': beat_ms,'1/8': beat_ms/2,'1/16': beat_ms/4,'1/32': beat_ms/8,'1/64': beat_ms/16}
     name, val = min(subdivisions.items(), key=lambda x: abs(x[1] - ms))
     return name, int(val)
 
-st.title("🎤 Advanced Vocal EQ Analyzer")
-st.write("Automated engineer-ready mix chain formatting")
+st.title("🎤 Reference-Matched Engineer Vocal Chain Analyzer")
+st.write("Upload your dry vocal and a reference. Get a pro chain with all settings for every plugin.")
 
-# Upload audio
+# Upload
 dry_file = st.file_uploader("Dry Vocal (WAV)", type='wav')
 ref_file = st.file_uploader("Reference Track (WAV)", type='wav')
 
-# Init session state defaults
+# Session defaults
 if 'chain_ready' not in st.session_state: st.session_state.chain_ready = False
 if 'chain_df' not in st.session_state: st.session_state.chain_df = pd.DataFrame()
 if 'ref_bpm' not in st.session_state: st.session_state.ref_bpm = 120
 if 'ref_key' not in st.session_state: st.session_state.ref_key = "Unknown"
 
-# Key and BPM detection & manual override UI
+# Key/BPM detection & user override
 st.subheader("🔑 Key & 🎵 Tempo Detection (Auto + Manual)")
-
 def detect(path):
     try:
         y, sr = librosa.load(path, sr=None, mono=True, duration=30)
@@ -65,7 +49,6 @@ def detect(path):
     except:
         return "Unknown", 120
 
-# Auto-detect on upload
 if dry_file and 'auto_dry' not in st.session_state:
     tmp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
     tmp.write(dry_file.read())
@@ -79,10 +62,9 @@ if ref_file and 'auto_ref' not in st.session_state:
     st.session_state.auto_ref = detect(tmp.name)
     os.unlink(tmp.name)
 
-auto_dry_key, auto_dry_bpm = st.session_state.auto_dry if 'auto_dry' in st.session_state else ("Unknown", 120)
-auto_ref_key, auto_ref_bpm = st.session_state.auto_ref if 'auto_ref' in st.session_state else ("Unknown", 120)
+auto_dry_key, auto_dry_bpm = st.session_state.auto_dry if 'auto_dry' in st.session_state else ("Unknown",120)
+auto_ref_key, auto_ref_bpm = st.session_state.auto_ref if 'auto_ref' in st.session_state else ("Unknown",120)
 
-# Manual override checkboxes
 st.session_state.edit_dry = st.checkbox("Edit Dry Key/BPM?", key="chk_dry")
 if st.session_state.edit_dry:
     col1, col2 = st.columns(2)
@@ -111,14 +93,10 @@ st.session_state.ref_bpm = ref_bpm
 st.write(f"• Dry → Key: **{dry_key}**, BPM: **{dry_bpm}**")
 st.write(f"• Ref → Key: **{ref_key}**, BPM: **{ref_bpm}**")
 
-# Analyze on button press
+# Analysis
 if dry_file and ref_file and st.button("Analyze Vocals"):
-    t1 = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-    t1.write(dry_file.read())
-    t1.close()
-    t2 = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-    t2.write(ref_file.read())
-    t2.close()
+    t1 = tempfile.NamedTemporaryFile(suffix='.wav', delete=False); t1.write(dry_file.read()); t1.close()
+    t2 = tempfile.NamedTemporaryFile(suffix='.wav', delete=False); t2.write(ref_file.read()); t2.close()
     dry_path, ref_path = t1.name, t2.name
 
     seg_start, seg_end = 0.33, 0.66
@@ -164,7 +142,7 @@ if dry_file and ref_file and st.button("Analyze Vocals"):
             peaks.append({"Band": band, "Center": cf, "Q": Q, "Cut": cut})
 
     df_ed = pd.DataFrame(peaks)
-    st.subheader("🔧 Surgical Notches")
+    st.subheader("🔧 Surgical Notches (Tweak each as needed)")
     edits = []
     for i, row in df_ed.iterrows():
         st.markdown(f"**{row['Band']} @ {row['Center']:.1f} Hz**")
@@ -175,53 +153,46 @@ if dry_file and ref_file and st.button("Analyze Vocals"):
 
     st.session_state.chain_df = df_ed.copy()
     st.session_state.chain_ready = True
-    st.success("Analysis complete. Ready to generate mix chain.")
+    st.success("Analysis complete. Ready to generate the engineer chain.")
 
     os.unlink(dry_path)
     os.unlink(ref_path)
 
-# Mix chain builder and output
+# Final chain renderer: every parameter
 if st.session_state.chain_ready:
-    st.subheader("🔧 Iterative Mix Chain Builder")
-    if st.button("Generate Engineer-Ready Chain"):
-        s = st.session_state.chain_df.copy()
-        for idx, pct in enumerate([0.10, 0.20, 0.10, 0.30, 0.20, 0.10], start=1):
-            s[f"P{idx}"] = (s["Cut"] * pct).round(2)
+    s = st.session_state.chain_df.copy()
+    for idx, pct in enumerate([0.10, 0.20, 0.10, 0.30, 0.20, 0.10], start=1):
+        s[f"P{idx}"] = (s["Cut"] * pct).round(2)
 
-        raw = {f"P{idx}": [] for idx in range(1, 7)}
-        for _, r in s.iterrows():
-            raw["P1"].append(f"{r['Band']} @ {r['Center']:.1f} Hz — Q 1.5, Cut {r['P1']} dB")
-            raw["P2"].append(f"{r['Band']} @ {r['Center']:.1f} Hz — Q {3 if r['Band'] == 'Low' else 4}, Cut {r['P2']} dB")
-        # Pass C: single shelf for all
-        mid_shelf_avg = s['P3'].mean()
-        raw["P3"].append(f"Mid-Shelf @ 1.2 kHz — Cut {mid_shelf_avg:.2f} dB")
-        raw["P3"].append(f"High-Shelf @ 12 kHz — Cut {mid_shelf_avg:.2f} dB")
-        for _, r in s.iterrows():
-            raw["P4"].append(f"{r['Band']} ~{r['Center']:.1f} Hz — Max {r['P4']} dB, Dynamic EQ")
-            raw["P5"].append(f"{r['Band']} @ {r['Center']:.1f} Hz — Q 0.7, Cut {r['P5']} dB")
+    st.markdown("## Reference-Matched Vocal Mix Engineer Chain")
 
-        templates = {
-            "P1": ("Pass A: Broad Subtractive Cuts (10%)", "FabFilter Pro-Q3 High-Pass & broad notch"),
-            "P2": ("Pass B: Narrow Notches (20%)", "Waves Q10 / FabFilter Pro-Q3"),
-            "P3": ("Pass C: Dynamic Shelves (10%)", "FabFilter Pro-Q3 Dynamic Shelves"),
-            "P4": ("Pass D: Dynamic Notches (30%)", "FabFilter Pro-Q3 Dynamic / Waves F6"),
-            "P5": ("Pass E: Parallel Notches & Air (20%)", "Maag EQ4 Air + Tape Saturation"),
-            "P6": ("Pass F: Compression & De-essing (10%)", "UAD 1176→SSL G-Bus→FabFilter Pro-DS")
-        }
+    # Pass A
+    st.markdown("### Pass A: Broad Subtractive Cuts (10%)")
+    st.markdown("*Plugin: FabFilter Pro-Q3 — Bell/EQ Notch*")
+    for _, r in s.iterrows():
+        st.write(f"• Band: {r['Band']} | Type: Bell | Center: {r['Center']:.1f} Hz | Q: 1.5 | Gain: –{r['P1']:.2f} dB")
+    st.write("• High-Pass: Type: HPF | Cutoff: 100 Hz | Slope: 12 dB/octave")
 
-        for key in ["P1", "P2", "P3", "P4", "P5"]:
-            header, plugin = templates[key]
-            st.markdown(f"### {header}\n*Plugin:* {plugin}")
-            for item in raw[key]:
-                st.write(f"• {item}")
+    # Pass B
+    st.markdown("### Pass B: Narrow Notches (20%)")
+    st.markdown("*Plugin: Waves Q10 or FabFilter Pro-Q3*")
+    for _, r in s.iterrows():
+        qv = 3 if r['Band'] == "Low" else 4
+        st.write(f"• Band: {r['Band']} | Type: Bell | Center: {r['Center']:.1f} Hz | Q: {qv} | Gain: –{r['P2']:.2f} dB")
 
-        # Pass F details
-        st.markdown(f"### {templates['P6'][0]}\n*Plugins:* {templates['P6'][1]}")
+    # Pass C
+    mid_shelf_avg = s['P3'].mean()
+    st.markdown("### Pass C: Dynamic Shelves (10%)")
+    st.markdown("*Plugin: FabFilter Pro-Q3 Dynamic (Shelf)*")
+    st.write(f"• Band: Mid | Type: Dynamic Shelf | Center: 1.2 kHz | Q: 0.8 | Threshold: –{mid_shelf_avg:.2f} dB | Attack: 1/64 (29 ms) | Release: 1/16 (117 ms)")
+    st.write(f"• Band: High | Type: Dynamic Shelf | Center: 12 kHz | Q: 0.7 | Threshold: –{mid_shelf_avg:.2f} dB | Attack: 1/64 (29 ms) | Release: 1/16 (117 ms)")
+
+    # Pass D
+    st.markdown("### Pass D: Dynamic Notches (30%)")
+    st.markdown("*Plugin: FabFilter Pro-Q3 Dynamic or Waves F6 (Dynamic Bell)*")
+    for _, r in s.iterrows():
         atk_sub, atk_ms = ms_to_subdivision(15, st.session_state.ref_bpm)
-        rel_sub, rel_ms = ms_to_subdivision(250, st.session_state.ref_bpm)
-        st.write(f"• Comp A 4:1 — Attack {atk_sub} ({atk_ms} ms), Release {rel_ms} ms")
-        st.write(f"• Comp B 2.5:1 — Attack {atk_sub} ({atk_ms} ms), Release {rel_ms} ms")
-        th_min, th_max = guidelines['deesser']['default']['threshold_db']
-        r_min, r_max = guidelines['deesser']['default']['ratio']
-        st.write(f"• De-Esser 5–8 kHz — Threshold {th_min} to {th_max} dB, Ratio {r_min}:{r_max}")
-        st.write(f"• Final A/B check vs reference (Key: {st.session_state.ref_key}, BPM: {st.session_state.ref_bpm})")
+        rel_sub, rel_ms = ms_to_subdivision(120, st.session_state.ref_bpm)
+        st.write(
+            f"• Band: {r['Band']} | Type: Dynamic Bell | Center: {r['Center']:.1f} Hz | Q: {r['Q']:.2f} | "
+            f"Threshold: –{r['P4']:.2f} dB | Attack: {atk_sub} ({atk_ms} ms) | Release: {rel
