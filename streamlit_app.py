@@ -12,15 +12,9 @@ import librosa
 @st.cache_data
 def load_guidelines():
     default = {
-        "dynamic_eq": {
-            "fabfilter_f6": {"attack_ms": [1, 10], "release_ms": [50, 250]}
-        },
-        "compressor": {
-            "neve_33609": {"attack_ms": [10, 30], "release_ms": [100, 300]}
-        },
-        "deesser": {
-            "default": {"threshold_db": [-20, -10], "ratio": [2, 6]}
-        }
+        "dynamic_eq": {"fabfilter_f6": {"attack_ms": [1, 10], "release_ms": [50, 250]}},
+        "compressor": {"neve_33609": {"attack_ms": [10, 30], "release_ms": [100, 300]}},
+        "deesser": {"default": {"threshold_db": [-20, -10], "ratio": [2, 6]}}
     }
     try:
         with open('engineer_guidelines.json') as f:
@@ -65,10 +59,10 @@ if dry_file and ref_file and st.button("Analyze Vocals"):
     colA, colB = st.columns(2)
     with colA:
         manual_dry_key = st.text_input("Dry Key (e.g. A minor)", "")
-        manual_dry_bpm = st.number_input("Dry BPM", 30, 300, 0)
+        manual_dry_bpm = st.number_input("Dry BPM", min_value=0, max_value=300, value=0)
     with colB:
         manual_ref_key = st.text_input("Ref Key (e.g. C major)", "")
-        manual_ref_bpm = st.number_input("Ref BPM", 30, 300, 0)
+        manual_ref_bpm = st.number_input("Ref BPM", min_value=0, max_value=300, value=0)
 
     def detect(path):
         try:
