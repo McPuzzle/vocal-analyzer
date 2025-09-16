@@ -56,13 +56,6 @@ if dry_file and ref_file and st.button("Analyze Vocals"):
 
     # Phase 1: Analysis & Diagnosis
     st.subheader("🔑 Key & 🎵 Tempo Detection")
-    colA, colB = st.columns(2)
-    with colA:
-        manual_dry_key = st.text_input("Dry Key (e.g. A minor)", "")
-        manual_dry_bpm = st.number_input("Dry BPM", min_value=0, max_value=300, value=0)
-    with colB:
-        manual_ref_key = st.text_input("Ref Key (e.g. C major)", "")
-        manual_ref_bpm = st.number_input("Ref BPM", min_value=0, max_value=300, value=0)
 
     def detect(path):
         try:
@@ -74,15 +67,28 @@ if dry_file and ref_file and st.button("Analyze Vocals"):
         except:
             return "Unknown", 120
 
-    if manual_dry_key and manual_dry_bpm:
-        dry_key, dry_bpm = manual_dry_key, int(manual_dry_bpm)
-    else:
-        dry_key, dry_bpm = detect(dry_path)
+    auto_dry_key, auto_dry_bpm = detect(dry_path)
+    auto_ref_key, auto_ref_bpm = detect(ref_path)
 
-    if manual_ref_key and manual_ref_bpm:
-        ref_key, ref_bpm = manual_ref_key, int(manual_ref_bpm)
+    st.markdown(f"**Dry Vocal** → Key: `{auto_dry_key}` | BPM: `{auto_dry_bpm}`")
+    if st.checkbox("Edit Dry Key/BPM?"):
+        col1, col2 = st.columns(2)
+        with col1:
+            dry_key = st.text_input("Dry Key", auto_dry_key)
+        with col2:
+            dry_bpm = st.number_input("Dry BPM", min_value=0, max_value=300, value=auto_dry_bpm)
     else:
-        ref_key, ref_bpm = detect(ref_path)
+        dry_key, dry_bpm = auto_dry_key, auto_dry_bpm
+
+    st.markdown(f"**Reference** → Key: `{auto_ref_key}` | BPM: `{auto_ref_bpm}`")
+    if st.checkbox("Edit Ref Key/BPM?"):
+        col1, col2 = st.columns(2)
+        with col1:
+            ref_key = st.text_input("Ref Key", auto_ref_key)
+        with col2:
+            ref_bpm = st.number_input("Ref BPM", min_value=0, max_value=300, value=auto_ref_bpm)
+    else:
+        ref_key, ref_bpm = auto_ref_key, auto_ref_bpm
 
     st.write(f"• Dry → Key: **{dry_key}**, BPM: **{dry_bpm}**")
     st.write(f"• Ref → Key: **{ref_key}**, BPM: **{ref_bpm}**")
