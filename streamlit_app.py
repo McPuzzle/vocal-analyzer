@@ -101,7 +101,6 @@ def detect_key_bpm_from_bytes(wav_bytes):
     tmp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
     tmp.write(wav_bytes)
     tmp.close()
-    key, bpm = None, None
     try:
         y, sr = librosa.load(tmp.name, sr=None, duration=30)
         chroma = librosa.feature.chroma_cens(y=y, sr=sr)
@@ -223,4 +222,3 @@ if dry and ref:
         # Cleanup
         os.unlink(dt.name)
         os.unlink(rt.name)
-v
