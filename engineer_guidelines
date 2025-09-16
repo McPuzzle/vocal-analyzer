@@ -1,11 +1,12 @@
 {
   "dynamic_eq": {
-    "default": { "attack_ms": [10, 30], "release_ms": [100, 200] },
-    "fabfilter_f6": { "attack_ms": [1, 10], "release_ms": [50, 250] }
+    "fabfilter_f6": { "attack_ms": [1, 10], "release_ms": [50, 250] },
+    "waves_f6": { "attack_ms": [5, 30], "release_ms": [80, 300] }
   },
   "compressor": {
     "neve_33609": { "attack_ms": [10, 30], "release_ms": [100, 300] },
-    "ssl_bus_comp": { "attack_ms": [1, 5], "release_ms": [50, 150] }
+    "ssl_bus_comp": { "attack_ms": [1, 5], "release_ms": [50, 150] },
+    "la2a": { "attack_ms": [10, 40], "release_ms": [200, 800] }
   },
   "deesser": {
     "default": { "threshold_db": [-20, -10], "ratio": [2, 6] }
