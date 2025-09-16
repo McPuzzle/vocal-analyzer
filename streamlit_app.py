@@ -8,11 +8,30 @@ import tempfile, os
 import json
 import librosa
 
-# Load engineering guidelines
+# Load engineering guidelines (with fallback defaults)
 @st.cache_data
 def load_guidelines():
-    with open('engineer_guidelines.json') as f:
-        return json.load(f)
+    default = {
+        "dynamic_eq": {
+            "fabfilter_f6": {"attack_ms": [1, 10], "release_ms": [50, 250]}
+        },
+        "compressor": {
+            "neve_33609": {"attack_ms": [10, 30], "release_ms": [100, 300]}
+        },
+        "deesser": {
+            "default": {"threshold_db": [-20, -10], "ratio": [2, 6]}
+        }
+    }
+    try:
+        with open('engineer_guidelines.json') as f:
+            data = json.load(f)
+            for section in default:
+                if section not in data:
+                    data[section] = default[section]
+            return data
+    except FileNotFoundError:
+        return default
+
 guidelines = load_guidelines()
 
 def ms_to_subdivision(ms, bpm):
@@ -24,7 +43,7 @@ def ms_to_subdivision(ms, bpm):
         '1/32': beat_ms/8,
         '1/64': beat_ms/16
     }
-    name, val = min(subdivisions.items(), key=lambda x: abs(x[1]-ms))
+    name, val = min(subdivisions.items(), key=lambda x: abs(x[1] - ms))
     return name, int(val)
 
 st.title("🎤 Advanced Vocal EQ Analyzer")
@@ -61,8 +80,15 @@ if dry_file and ref_file and st.button("Analyze Vocals"):
         except:
             return "Unknown", 120
 
-    dry_key, dry_bpm = (manual_dry_key, manual_dry_bpm) if manual_dry_key and manual_dry_bpm else detect(dry_path)
-    ref_key, ref_bpm = (manual_ref_key, manual_ref_bpm) if manual_ref_key and manual_ref_bpm else detect(ref_path)
+    if manual_dry_key and manual_dry_bpm:
+        dry_key, dry_bpm = manual_dry_key, int(manual_dry_bpm)
+    else:
+        dry_key, dry_bpm = detect(dry_path)
+
+    if manual_ref_key and manual_ref_bpm:
+        ref_key, ref_bpm = manual_ref_key, int(manual_ref_bpm)
+    else:
+        ref_key, ref_bpm = detect(ref_path)
 
     st.write(f"• Dry → Key: **{dry_key}**, BPM: **{dry_bpm}**")
     st.write(f"• Ref → Key: **{ref_key}**, BPM: **{ref_bpm}**")
@@ -71,12 +97,13 @@ if dry_file and ref_file and st.button("Analyze Vocals"):
     seg_start, seg_end = 0.33, 0.66
     def spectrum(path):
         sr, data = wavfile.read(path)
-        if data.ndim>1: data = data.mean(1)
+        if data.ndim > 1: data = data.mean(1)
         seg = data[int(len(data)*seg_start):int(len(data)*seg_end)]
         w = seg * windows.hann(len(seg))
         fft = np.fft.rfft(w)
         freqs = np.fft.rfftfreq(len(seg), 1/sr)
         return freqs, np.abs(fft)
+
     freqs, mag_dry = spectrum(dry_path)
     _, mag_ref = spectrum(ref_path)
 
@@ -87,83 +114,81 @@ if dry_file and ref_file and st.button("Analyze Vocals"):
     st.plotly_chart(fig, use_container_width=True)
 
     # Identify surgical peaks
-    bands = {"Low":(20,600),"Mid":(600,1200),"High":(1200,12000)}
-    peaks=[]
-    for band,(fmin,fmax) in bands.items():
-        idx = (freqs>=fmin)&(freqs<=fmax)
+    bands = {"Low": (20,600), "Mid": (600,1200), "High": (1200,12000)}
+    peaks = []
+    for band, (fmin, fmax) in bands.items():
+        idx = (freqs >= fmin) & (freqs <= fmax)
         bm, bf = mag_dry[idx], freqs[idx]
         p, props = find_peaks(bm, height=bm.max()*0.05)
         if not p.size: continue
         top = p[np.argsort(props["peak_heights"])[-3:]]
         for i in top:
             cf = bf[i]
-            half=bm[i]/np.sqrt(2)
-            l=i
-            while l>0 and bm[l]>half: l-=1
-            r=i
-            while r<len(bm)-1 and bm[r]>half: r+=1
-            bw=bf[r]-bf[l] if r<len(bf) and l>=0 else cf/10
-            Q = cf/bw if bw>0 else 10
-            cut = np.clip(10*np.log10(bm[i]/bm.median()), 1, 8)
-            peaks.append({"Band":band,"Center":cf,"Q":Q,"Cut":cut})
+            half = bm[i] / np.sqrt(2)
+            l = i
+            while l > 0 and bm[l] > half: l -= 1
+            r = i
+            while r < len(bm)-1 and bm[r] > half: r += 1
+            bw = bf[r] - bf[l] if r < len(bf) and l >= 0 else cf/10
+            Q = cf / bw if bw > 0 else 10
+            cut = np.clip(10 * np.log10(bm[i] / np.median(bm)), 1, 8)
+            peaks.append({"Band": band, "Center": cf, "Q": Q, "Cut": cut})
 
     df = pd.DataFrame(peaks)
     st.subheader("🔧 Surgical Notches")
-    edits=[]
-    for i,row in df.iterrows():
+    edits = []
+    for i, row in df.iterrows():
         st.markdown(f"**{row['Band']} @ {row['Center']:.1f} Hz**")
-        c = st.slider(f"Cut dB",1.0,8.0,value=float(row["Cut"]),step=0.1,key=f"c{i}")
-        q = st.slider(f"Q",1.0,10.0,value=float(row["Q"]),step=0.1,key=f"q{i}")
-        edits.append({"Band":row["Band"],"Center":row["Center"],"Q":q,"Cut":c})
+        c = st.slider("Cut dB", 1.0, 8.0, value=float(row["Cut"]), step=0.1, key=f"c{i}")
+        q = st.slider("Q", 1.0, 10.0, value=float(row["Q"]), step=0.1, key=f"q{i}")
+        edits.append({"Band": row["Band"], "Center": row["Center"], "Q": q, "Cut": c})
     df_ed = pd.DataFrame(edits)
     st.dataframe(df_ed)
 
     # Phase 2 & 3: Iterative Mix Chain
     if st.button("🔧 Build Iterative Mix Chain"):
         s = df_ed.copy()
-        # Compute split amounts
-        s["P1"] = (s["Cut"]*0.10).round(2)
-        s["P2"] = (s["Cut"]*0.20).round(2)
-        s["P3"] = (s["Cut"]*0.10).round(2)
-        s["P4"] = (s["Cut"]*0.30).round(2)
-        s["P5"] = (s["Cut"]*0.20).round(2)
-        s["P6"] = (s["Cut"]*0.10).round(2)
+        s["P1"] = (s["Cut"] * 0.10).round(2)
+        s["P2"] = (s["Cut"] * 0.20).round(2)
+        s["P3"] = (s["Cut"] * 0.10).round(2)
+        s["P4"] = (s["Cut"] * 0.30).round(2)
+        s["P5"] = (s["Cut"] * 0.20).round(2)
+        s["P6"] = (s["Cut"] * 0.10).round(2)
 
         st.subheader("Phase 2: Subtractive Passes")
-        # Pass A
         st.write("**Pass A (5–10% broad cuts)**: Broad-Q shelf/notch")
-        for _,r in s.iterrows():
+        for _, r in s.iterrows():
             st.write(f"• {r['Band']} @ {r['Center']:.1f} Hz — Q 1.5, Cut {r['P1']} dB")
-        # Pass B
-        st.write("**Pass B (10–20% narrow notches)**")
-        for _,r in s.iterrows():
-            q = 3.0 if r['Band']=="Low" else 4.0
-            st.write(f"• {r['Band']} @ {r['Center']:.1f} Hz — Q {q}, Cut {r['P2']} dB")
-        # Pass C
-        st.write("**Pass C (10–20% dynamic EQ)**")
-        for _,r in s.iterrows():
-            subdiv_atk, atk_ms = ms_to_subdivision(5, ref_bpm)
-            subdiv_rel, rel_ms = ms_to_subdivision(120, ref_bpm)
-            st.write(f"• {r['Band']} ~{r['Center']:.1f} Hz — Max {r['P4']} dB, Ratio 3:1")
-            st.write(f"  Attack ~{subdiv_atk} ({atk_ms} ms), Release ~{subdiv_rel} ({rel_ms} ms)")
 
-        # Pass D: Balance compression
-        subdiv_a, a_ms = ms_to_subdivision(15, ref_bpm)
-        subdiv_b, b_ms = ms_to_subdivision(250, ref_bpm)
-        st.write("**Pass D (Serial Compression)**")
-        st.write(f"• Comp A 4:1 — Attack ~{subdiv_a} ({a_ms} ms), Release ~{subdiv_b} ({b_ms} ms), GR ~2 dB")
-        st.write(f"• Comp B 2.5:1 — Attack ~{subdiv_a} ({a_ms} ms), Release ~{subdiv_b} ({b_ms} ms), GR ~2 dB")
+        st.write("**Pass B (10–20% narrow notches)**")
+        for _, r in s.iterrows():
+            q_val = 3.0 if r['Band'] == "Low" else 4.0
+            st.write(f"• {r['Band']} @ {r['Center']:.1f} Hz — Q {q_val}, Cut {r['P2']} dB")
+
+        st.write("**Pass C (10–20% dynamic EQ)**")
+        for _, r in s.iterrows():
+            atk_sub, atk_ms = ms_to_subdivision(5, ref_bpm)
+            rel_sub, rel_ms = ms_to_subdivision(120, ref_bpm)
+            st.write(f"• {r['Band']} ~{r['Center']:.1f} Hz — Max {r['P4']} dB reduction, Ratio 3:1")
+            st.write(f"  Attack ~{atk_sub} ({atk_ms} ms), Release ~{rel_sub} ({rel_ms} ms)")
+
+        st.subheader("Pass D (Serial Compression)")
+        atk_sub, atk_ms = ms_to_subdivision(15, ref_bpm)
+        rel_sub, rel_ms = ms_to_subdivision(250, ref_bpm)
+        st.write(f"• Comp A 4:1 — Attack ~{atk_sub} ({atk_ms} ms), Release ~{rel_sub} ({rel_ms} ms), GR ~2 dB")
+        st.write(f"• Comp B 2.5:1 — Attack ~{atk_sub} ({atk_ms} ms), Release ~{rel_sub} ({rel_ms} ms), GR ~2 dB")
 
         st.subheader("Phase 3: Additive Passes")
-        # Pass E
         st.write("**Pass E (Shelving & Parallel Sat 5–10%)**")
-        for _,r in s.iterrows():
+        for _, r in s.iterrows():
             st.write(f"• Parallel Notch @ {r['Center']:.1f} Hz — Q 0.7, Cut {r['P5']} dB")
         st.write("• High-Shelf @ 10 kHz — +1.5 dB, Q 0.7")
         st.write("• Parallel Saturation Bus (HP 800 Hz, LP 12 kHz) at 10% blend")
-        # Pass F
+
         st.write("**Pass F (Final Touches)**")
-        st.write("• De-Esser 5–8 kHz — Threshold ~–15 dB, Ratio 4:1")
+        th_min, th_max = guidelines['deesser']['default']['threshold_db']
+        ratio_min, ratio_max = guidelines['deesser']['default']['ratio']
+        st.write(f"• De-Esser 5–8 kHz — Threshold {th_min} to {th_max} dB, Ratio {ratio_min}:{ratio_max}")
         st.write("• Manual clip-gain rides")
         st.write(f"• A/B vs reference (Key: {ref_key}, BPM: {ref_bpm})")
 
