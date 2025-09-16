@@ -2,14 +2,16 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 from scipy.io import wavfile
-from scipy.signal import windows, find_peaks
-import librosa
+from scipy.signal import windows, find_peaks, butter, sosfilt
+import plotly.graph_objects as go
 import tempfile, os
 import json
+import librosa
 
+# Load engineering guidelines (with fallback defaults)
 @st.cache_data
 def load_guidelines():
-    return {
+    default = {
         'deesser': {'threshold_db': [-20, -10], 'ratio': [2, 6]},
         'saturation_blend': 0.1,
         'highpass_cutoff': 100,
@@ -24,23 +26,52 @@ def load_guidelines():
         'compression_gr_db': 2,
         'compression_ratios': [(4, 'Comp A'), (2.5, 'Comp B')],
         'deesser_freq_range': (5000, 8000),
-        'sibilance_threshold_rms': 0.02  # Adjust empirically
+        'sibilance_threshold_rms': 0.02  # Tune as needed
     }
+    try:
+        with open('engineer_guidelines.json') as f:
+            data = json.load(f)
+            for k, v in default.items():
+                data.setdefault(k, v)
+            return data
+    except FileNotFoundError:
+        return default
+
+guidelines = load_guidelines()
 
 def ms_to_subdivision(ms, bpm):
     beat_ms = 60000 / bpm
-    subs = {'1/4': beat_ms, '1/8': beat_ms/2, '1/16': beat_ms/4, '1/32': beat_ms/8, '1/64': beat_ms/16}
+    subs = {
+        '1/4': beat_ms,
+        '1/8': beat_ms / 2,
+        '1/16': beat_ms / 4,
+        '1/32': beat_ms / 8,
+        '1/64': beat_ms / 16,
+    }
     name, val = min(subs.items(), key=lambda x: abs(x[1] - ms))
     return name, int(val)
 
-def clamp_q(q, min_q=5, max_q=15):
-    return max(min_q, min(q, max_q))
+def clamp_q(q):
+    return max(guidelines['min_q_dynamic_eq'], min(q, guidelines['max_q_dynamic_eq']))
+
+def butter_bandpass(lowcut, highcut, fs, order=4):
+    sos = butter(order, [lowcut, highcut], fs=fs, btype='band', output='sos')
+    return sos
+
+def bandpass_filter(data, lowcut, highcut, fs, order=4):
+    sos = butter_bandpass(lowcut, highcut, fs, order=order)
+    y = sosfilt(sos, data)
+    return y
+
+def measure_sibilance(y, sr):
+    filtered = bandpass_filter(y, guidelines['deesser_freq_range'][0], guidelines['deesser_freq_range'][1], sr, order=4)
+    rms = np.sqrt(np.mean(filtered**2))
+    return rms
 
 def detect_resonances(freqs, mag_dry, threshold_db=-15, max_peaks=9):
-    peak_indices, properties = find_peaks(mag_dry, height=np.max(mag_dry)*0.05)
+    peak_indices, properties = find_peaks(mag_dry, height=np.max(mag_dry) * 0.05)
     if len(peak_indices) == 0:
         return []
-    # Sort by peak height descending
     sorted_indices = peak_indices[np.argsort(properties['peak_heights'])[::-1]]
     resonances = []
     for idx in sorted_indices[:max_peaks]:
@@ -64,21 +95,14 @@ def estimate_bandwidth(freqs, mag, peak_idx):
     bw = freqs[right] - freqs[left] if right > left else freqs[peak_idx] / 10
     return bw
 
-def measure_sibilance(y, sr):
-    # Rough RMS in 5–8 kHz range as sibilance proxy
-    s = librosa.effects.harmonic(y)
-    s_band = librosa.effects.bandpass(s, 5000, 8000, sr=sr)
-    rms = np.sqrt(np.mean(s_band**2))
-    return rms
-
-# Streamlit app logic continues here...
 
 st.title("🎤 Musical Vocal Mix Chain Assistant")
+
 dry_file = st.file_uploader("Upload Dry Vocal (WAV)", type="wav")
 ref_file = st.file_uploader("Upload Reference WAV", type="wav")
 
 if dry_file and ref_file and st.button("Analyze Mix Chain"):
-    # Save files temporarly
+    # Save temp files
     t1 = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     t1.write(dry_file.read())
     t1.close()
@@ -87,32 +111,28 @@ if dry_file and ref_file and st.button("Analyze Mix Chain"):
     t2.close()
     dry_path, ref_path = t1.name, t2.name
 
-    # Load audio for sibilance
     y_dry, sr_dry = librosa.load(dry_path, sr=None)
     sibilance_rms = measure_sibilance(y_dry, sr_dry)
 
-    # Spectrum calculation
     def spectrum(path):
         sr, data = wavfile.read(path)
         if data.ndim > 1:
             data = data.mean(axis=1)
-        seg = data[int(len(data)*0.33):int(len(data)*0.66)]
+        seg = data[int(len(data) * 0.33): int(len(data) * 0.66)]
         w = seg * windows.hann(len(seg))
         fft = np.fft.rfft(w)
-        freqs = np.fft.rfftfreq(len(seg), 1/sr)
+        freqs = np.fft.rfftfreq(len(seg), 1 / sr)
         mags = np.abs(fft)
         return freqs, mags
 
     freqs, mag_dry = spectrum(dry_path)
 
-    # Detect resonances
     resonances = detect_resonances(freqs, mag_dry)
 
-    # Show mix chain suggestions
     st.markdown("## Suggested Mix Chain")
 
     st.markdown("### 1. Cleaning")
-    st.write(f"• High-pass filter at 100 Hz, 12 dB/oct")
+    st.write(f"• High-pass filter at {guidelines['highpass_cutoff']} Hz, {guidelines['highpass_slope']} dB/oct")
 
     if len(resonances) > 0:
         st.markdown("• Broad subtractive EQ cuts:")
@@ -122,9 +142,9 @@ if dry_file and ref_file and st.button("Analyze Mix Chain"):
     st.markdown("### 2. Tone shaping")
     st.write("• Gentle shelving EQ to shape mid and high frequencies dynamically.")
 
-    if sibilance_rms > 0.02:  # threshold value to tune as needed
+    if sibilance_rms > guidelines['sibilance_threshold_rms']:
         st.markdown("### 3. De-Essing")
-        st.write(f"• Apply De-Esser around 5–8 kHz with threshold -20 to -10 dB, ratio 2:1 to 6:1.")
+        st.write(f"• Apply De-Esser around {guidelines['deesser_freq_range'][0]}–{guidelines['deesser_freq_range'][1]} Hz with threshold -20 to -10 dB, ratio 2:1 to 6:1.")
 
     st.markdown("### 4. Compression & Glue")
     st.write(f"• Use two-stage compression (e.g. 1176 at 4:1 and SSL G-bus at 2.5:1) with BPM synced attack/release.")
